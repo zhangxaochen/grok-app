@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "grok-app"
-version = "0.2.31"
+version = "0.2.32"
 dependencies = [
  "arboard",
  "async-stream",
