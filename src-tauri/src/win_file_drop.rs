@@ -33,7 +33,7 @@ use windows::{
         Foundation::{HWND, LPARAM, POINT, POINTL},
         Graphics::Gdi::ScreenToClient,
         System::{
-            Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL},
+            Com::{IDataObject, ReleaseStgMedium, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL},
             Ole::{
                 IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, RevokeDragDrop,
                 CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
@@ -41,7 +41,7 @@ use windows::{
             SystemServices::MODIFIERKEYS_FLAGS,
         },
         UI::{
-            Shell::{DragFinish, DragQueryFileW, HDROP},
+            Shell::{DragQueryFileW, HDROP},
             WindowsAndMessaging::{EnumChildWindows, GetWindow, GW_CHILD, GW_HWNDNEXT},
         },
     },
@@ -54,7 +54,7 @@ const DRAG_LEAVE: &str = "tauri://drag-leave";
 
 // Keep `IDropTarget` COM refs alive on the UI thread (STA).
 thread_local! {
-    static TARGETS: RefCell<Vec<IDropTarget>> = const { RefCell::new(Vec::new()) };
+    static TARGETS: RefCell<Vec<(HWND, IDropTarget)>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Clone, Serialize)]
@@ -105,11 +105,11 @@ fn register_on_window(window: &WebviewWindow) {
 
     let mut registered = 0usize;
     // Parent first (frameless client ≈ webview), then every child HWND.
-    if inject_hwnd(hwnd, listener.clone()) {
+    if inject_hwnd(hwnd, hwnd, listener.clone()) {
         registered += 1;
     }
     for child in enum_child_hwnds(hwnd) {
-        if inject_hwnd(child, listener.clone()) {
+        if inject_hwnd(child, hwnd, listener.clone()) {
             registered += 1;
         }
     }
@@ -172,16 +172,20 @@ enum DropKind {
     Leave,
 }
 
-fn inject_hwnd(hwnd: HWND, listener: Rc<dyn Fn(DropKind)>) -> bool {
+fn inject_hwnd(hwnd: HWND, coordinate_hwnd: HWND, listener: Rc<dyn Fn(DropKind)>) -> bool {
     if hwnd.0.is_null() {
         return false;
     }
-    let target: IDropTarget = FileDropTarget::new(hwnd, listener).into();
+    let target: IDropTarget = FileDropTarget::new(hwnd, coordinate_hwnd, listener).into();
     // Best-effort revoke (hwnd may never have been a drop target — that is OK).
     let _ = unsafe { RevokeDragDrop(hwnd) };
     match unsafe { RegisterDragDrop(hwnd, &target) } {
         Ok(()) => {
-            TARGETS.with(|slot| slot.borrow_mut().push(target));
+            TARGETS.with(|slot| {
+                let mut targets = slot.borrow_mut();
+                targets.retain(|(registered, _)| registered.0 != hwnd.0);
+                targets.push((hwnd, target));
+            });
             true
         }
         Err(e) => {
@@ -227,15 +231,17 @@ fn enum_child_hwnds(parent: HWND) -> Vec<HWND> {
 #[implement(IDropTarget)]
 struct FileDropTarget {
     hwnd: HWND,
+    coordinate_hwnd: HWND,
     listener: Rc<dyn Fn(DropKind)>,
     cursor_effect: UnsafeCell<DROPEFFECT>,
     enter_is_valid: UnsafeCell<bool>,
 }
 
 impl FileDropTarget {
-    fn new(hwnd: HWND, listener: Rc<dyn Fn(DropKind)>) -> Self {
+    fn new(hwnd: HWND, coordinate_hwnd: HWND, listener: Rc<dyn Fn(DropKind)>) -> Self {
         Self {
             hwnd,
+            coordinate_hwnd,
             listener,
             cursor_effect: UnsafeCell::new(DROPEFFECT_NONE),
             enter_is_valid: UnsafeCell::new(false),
@@ -245,7 +251,7 @@ impl FileDropTarget {
     unsafe fn iterate_filenames<F>(
         data_obj: windows_core::Ref<'_, IDataObject>,
         mut callback: F,
-    ) -> Option<HDROP>
+    ) -> bool
     where
         F: FnMut(PathBuf),
     {
@@ -257,8 +263,12 @@ impl FileDropTarget {
             tymed: TYMED_HGLOBAL.0 as u32,
         };
 
-        let obj = data_obj.as_ref()?;
-        let medium = obj.GetData(&drop_format).ok()?;
+        let Some(obj) = data_obj.as_ref() else {
+            return false;
+        };
+        let Ok(mut medium) = obj.GetData(&drop_format) else {
+            return false;
+        };
         let hdrop = HDROP(medium.u.hGlobal.0 as _);
         let item_count = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
         for i in 0..item_count {
@@ -267,7 +277,8 @@ impl FileDropTarget {
             DragQueryFileW(hdrop, i, Some(&mut path_buf));
             callback(OsString::from_wide(&path_buf[..character_count]).into());
         }
-        Some(hdrop)
+        ReleaseStgMedium(&mut medium);
+        true
     }
 
     fn client_point(hwnd: HWND, pt: &POINTL) -> (i32, i32) {
@@ -299,10 +310,11 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
         pt: &POINTL,
         pdwEffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
-        let (x, y) = FileDropTarget::client_point(self.hwnd, pt);
+        let (x, y) = FileDropTarget::client_point(self.coordinate_hwnd, pt);
         let mut paths = Vec::new();
-        let hdrop = unsafe { FileDropTarget::iterate_filenames(pDataObj, |path| paths.push(path)) };
-        let enter_is_valid = hdrop.is_some() && !paths.is_empty();
+        let has_data =
+            unsafe { FileDropTarget::iterate_filenames(pDataObj, |path| paths.push(path)) };
+        let enter_is_valid = has_data && !paths.is_empty();
         unsafe {
             *self.enter_is_valid.get() = enter_is_valid;
         }
@@ -330,7 +342,7 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
         pdwEffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         if unsafe { *self.enter_is_valid.get() } {
-            let (x, y) = FileDropTarget::client_point(self.hwnd, pt);
+            let (x, y) = FileDropTarget::client_point(self.coordinate_hwnd, pt);
             (self.listener)(DropKind::Over { x, y });
         }
         unsafe {
@@ -357,18 +369,14 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
         pdwEffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         if unsafe { *self.enter_is_valid.get() } {
-            let (x, y) = FileDropTarget::client_point(self.hwnd, pt);
+            let (x, y) = FileDropTarget::client_point(self.coordinate_hwnd, pt);
             let mut paths = Vec::new();
-            let hdrop =
-                unsafe { FileDropTarget::iterate_filenames(pDataObj, |path| paths.push(path)) };
+            unsafe { FileDropTarget::iterate_filenames(pDataObj, |path| paths.push(path)) };
             (self.listener)(DropKind::Drop {
                 paths: FileDropTarget::paths_as_strings(paths),
                 x,
                 y,
             });
-            if let Some(hdrop) = hdrop {
-                unsafe { DragFinish(hdrop) };
-            }
             unsafe {
                 *self.enter_is_valid.get() = false;
             }
