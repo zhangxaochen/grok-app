@@ -47,7 +47,6 @@ import { writeOpenTargetStorage } from "@/lib/openEditorHonesty";
 import { buildContinueAgentPrompt } from "@/lib/continueInterruptedTurn";
 import {
   APP_CLOSE_REQUESTED_EVENT,
-  APP_CLOSE_TAB_OR_WINDOW_EVENT,
   loadAlwaysQuitWithoutAskingPref,
   shouldConfirmQuit,
 } from "@/lib/confirmQuit";
@@ -553,18 +552,11 @@ import {
 } from "@/lib/providerBalanceFormat";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import {
-  applySideStripClose,
-  emptySideWorkbenchState,
-  openSideTab,
-  openSideTabFromPicker,
   type SidePickerKind,
-  type SideWorkbenchState,
 } from "@/lib/sideWorkbench";
 import {
-  isSideDockComposerActive,
   shouldHideChatForSideExpand,
 } from "@/lib/sideFloatComposer";
-import { applySideContextOpen } from "@/lib/sideContextOpen";
 import { resolveSidePathDeepLink } from "@/lib/sidePathDeepLink";
 
 import { WorkbenchAppDialogStage } from "@/app/WorkbenchAppDialogStage";
@@ -576,7 +568,7 @@ import {
   summarizeSessionChanges,
   type SessionFileChange,
 } from "@/lib/sessionChanges";
-import { pinReviewFocusPath } from "@/lib/reviewFocusPaths";
+
 import {
   gitDirtySummariesEqual,
   summarizeGitDirty,
@@ -653,7 +645,10 @@ import {
 import { useSidebarProjectReorder } from "@/hooks/useSidebarProjectReorder";
 import { useSessionMoveProject } from "@/hooks/useSessionMoveProject";
 import { useSidebarSessionMoveDrag } from "@/hooks/useSidebarSessionMoveDrag";
-import { useSideWorkbenchProjectIsolation } from "@/hooks/useSideWorkbenchProjectIsolation";
+import {
+  createSideWorkbenchChromeHost,
+  useSideWorkbenchChrome,
+} from "@/hooks/useSideWorkbenchChrome";
 import { useBottomTerminal } from "@/hooks/useBottomTerminal";
 import { useProjectSpaces } from "@/hooks/useProjectSpaces";
 import {
@@ -984,29 +979,6 @@ export function AppWorkbench() {
   } = useWorkbenchLayout({
     onAsideClose: () => asideCloseExtrasRef.current(),
   });
-  /** Side Workbench multi-kind tabs (session-local; Phase 0+). */
-  const [sideWorkbench, setSideWorkbench] = useState<SideWorkbenchState>(
-    emptySideWorkbenchState,
-  );
-  const sideWorkbenchRef = useRef(sideWorkbench);
-  sideWorkbenchRef.current = sideWorkbench;
-  const [closeActiveSideRequest, setCloseActiveSideRequest] = useState<{
-    token: number;
-  } | null>(null);
-  const closeActiveSideTokenRef = useRef(0);
-  /**
-   * When side is expanded: optional bottom-docked compressed composer (icon toggle).
-   * Resets whenever expand ends.
-   */
-  const [sideDockComposer, setSideDockComposer] = useState(false);
-  /**
-   * Measured height of the docked composer strip.
-   * Drives --sw-dock-composer-h so the side pane ends above it.
-   */
-  const [sideDockComposerH, setSideDockComposerH] = useState(0);
-  /** Git work tree gate for Review picker entry. */
-  const [sideIsGitProject, setSideIsGitProject] = useState(false);
-
   /**
    * Secondary session window (`session-*` label / `#/session/<id>` deep link).
    * Live-capable (session-keyed Host pool): send / stop / warm-connect use the
@@ -1073,16 +1045,6 @@ export function AppWorkbench() {
   const [sessionChangesById, setSessionChangesById] = useState<
     Record<string, SessionFileChange[]>
   >({});
-  /**
-   * Turn changed-files chip → Review focus (#998).
-   * Lifted out of SideWorkbench so open races cannot drop the path.
-   * `pinnedPaths` always appear in Review even when sessionChanges is empty.
-   */
-  const [reviewFocus, setReviewFocus] = useState<{
-    path: string;
-    token: number;
-    pinnedPaths: string[];
-  } | null>(null);
   /**
    * Workspace git dirty summary for the active project (composer chip).
    * Null when not a repo, unavailable, clean, or no active project.
@@ -1280,11 +1242,6 @@ export function AppWorkbench() {
     sessions,
   });
   const [activeProject, setActiveProject] = useState<Project | null>(null);
-  useSideWorkbenchProjectIsolation(
-    activeProject?.id,
-    sideWorkbench,
-    setSideWorkbench,
-  );
   const bottomTerminal = useBottomTerminal(activeProject?.id);
   const [bottomTerminalMounted, setBottomTerminalMounted] = useState(false);
   useEffect(() => {
@@ -1302,26 +1259,6 @@ export function AppWorkbench() {
   /** Effective agent / resource root: bound project, else general workspace dir. */
   const effectiveProjectPath =
     activeProject?.path?.trim() || generalWorkspacePath || null;
-  /** Probe git so Side Workbench Review entry is gated. */
-  useEffect(() => {
-    const path = effectiveProjectPath?.trim();
-    if (!path) {
-      setSideIsGitProject(false);
-      return;
-    }
-    let cancelled = false;
-    void api
-      .gitStatus(path)
-      .then((r) => {
-        if (!cancelled) setSideIsGitProject(!!r?.available);
-      })
-      .catch(() => {
-        if (!cancelled) setSideIsGitProject(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [effectiveProjectPath]);
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
   /** Avoid writing collapse prefs before settings hydrate on launch. */
   const expandedProjectsHydratedRef = useRef(false);
@@ -1391,6 +1328,7 @@ export function AppWorkbench() {
   const sessionNavHostRef = useRef(createSessionNavHost());
   const sessionConnectHostRef = useRef(createSessionConnectHost());
   const gitWorktreeHostRef = useRef(createGitWorktreeChromeHost());
+  const sideWorkbenchHostRef = useRef(createSideWorkbenchChromeHost());
   const {
     openSession,
     newChat,
@@ -1856,17 +1794,35 @@ export function AppWorkbench() {
     useState<ResourceOpenTarget | null>(null);
   /** Bump to force ResourceViewer into Plan review mode (详情 / auto-open). */
   const [planFocusKey, setPlanFocusKey] = useState(0);
-  /**
-   * True when we expanded the right resource pane for this plan cycle
-   * (auto-open on review or 详情). Hard-dismiss collapses it so the next
-   * open is a clean files pane, not a stuck Plan workbench.
-   */
-  const planOpenedAsideRef = useRef(false);
-  asideCloseExtrasRef.current = () => {
-    planOpenedAsideRef.current = false;
-    setSideWorkbench((s) => (s.expanded ? { ...s, expanded: false } : s));
-    setSideDockComposer(false);
-  };
+  const {
+    sideWorkbench,
+    setSideWorkbench,
+    closeActiveSideRequest,
+    sideDockComposer,
+    sideDockComposerH,
+    setSideDockComposerH,
+    sideIsGitProject,
+    reviewFocus,
+    planOpenedAsideRef,
+    sideDockActive,
+    openSkills,
+    openPlan,
+    openPicker,
+    openReview,
+    focusReviewPath,
+    onAsideCloseExtras,
+    onExpandedChange,
+    toggleDockComposer,
+    consumeCloseActive,
+  } = useSideWorkbenchChrome({
+    hostRef: sideWorkbenchHostRef,
+    projectId: activeProject?.id,
+    projectPath: effectiveProjectPath,
+    asideCollapsed: layout.asideCollapsed,
+    phoneLayout,
+    resourceOpenTarget,
+  });
+  asideCloseExtrasRef.current = onAsideCloseExtras;
   /** Live drag-drop target for zone overlays (null = not dragging). */
   const [dragZone, setDragZone] = useState<"sidebar" | "main" | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -2254,35 +2210,6 @@ export function AppWorkbench() {
   });
   const dragRegion = tauriDragRegion(platform);
   const [windowMaximized, setWindowMaximized] = useState(false);
-
-  /**
-   * Route chat context opens into Side Workbench tabs.
-   * When the aside is collapsed, open it and keep `resourceOpenTarget` so
-   * SideWorkbench can consume path (e.g. Review focus for #998). Clearing
-   * here dropped path and left Review empty / unfocused.
-   */
-  useEffect(() => {
-    if (!resourceOpenTarget) return;
-    if (!layout.asideCollapsed) return;
-    const result = applySideContextOpen(sideWorkbench, resourceOpenTarget, {
-      isGitProject: sideIsGitProject,
-    });
-    // Turn-chip opens with a path still work without git — skip the scary toast (#998).
-    const skipNotGitToast =
-      resourceOpenTarget.type === "changes" &&
-      !!(resourceOpenTarget.path || "").trim();
-    if (result.noticeKey && !skipNotGitToast) {
-      showToast(tr(result.noticeKey), 2400);
-    }
-    if (result.needAsideOpen) {
-      setSideWorkbench(result.state);
-      openAsidePane();
-      // Keep target — SideWorkbench openRequest effect consumes path + clears.
-      return;
-    }
-    setResourceOpenTarget(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- consume once per target
-  }, [resourceOpenTarget, layout.asideCollapsed]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -6685,14 +6612,13 @@ export function AppWorkbench() {
     setSlashQuery(null);
     setLiveSlash({ present: false, query: "", start: 0, end: 0 });
     liveSlashRef.current = { present: false, query: "", start: 0, end: 0 };
-    setSideWorkbench((s) => openSideTab(s, "skills"));
-    openAsidePane();
+    openSkills();
   }, [
     setShowComposerPlus,
     setSlashQuery,
     setLiveSlash,
     liveSlashRef,
-    openAsidePane,
+    openSkills,
   ]);
 
   const atMenuOpen = liveAt.present && !composerMenuOpen;
@@ -7598,16 +7524,6 @@ export function AppWorkbench() {
       },
     });
   }, [archivePlanDecision, tr, writePlanForViewing]);
-
-  /** Open Side Workbench Plan tab (review / waiting empty / open-in-resources). */
-  const openPlanInResource = useCallback(() => {
-    planOpenedAsideRef.current = true;
-    setSideWorkbench((s) =>
-      openSideTab(s, "plan", { name: "side.tab.plan" }),
-    );
-    openAsidePane();
-    setPlanFocusKey((k) => k + 1);
-  }, [openAsidePane]);
 
   /**
    * Exit the bare “计划模式” chip (mode === "plan", no plan content yet).
@@ -9804,22 +9720,10 @@ export function AppWorkbench() {
       : layout.sidebarWidth || SIDEBAR_DEFAULT_WIDTH;
   const asidePaint =
     layout.asideCollapsed || asideOverlay ? 0 : layout.asideWidth;
-  const sideDockActive = isSideDockComposerActive({
-    expanded: sideWorkbench.expanded,
-    dockComposer: sideDockComposer,
-    phoneLayout,
-  });
   const dockSidebarOccupied =
     phoneLayout || layout.sidebarCollapsed || sidebarOverlay
       ? 0
       : layout.sidebarWidth;
-
-  // Expand ends → close dock toggle.
-  useEffect(() => {
-    if (sideWorkbench.expanded) return;
-    setSideDockComposer(false);
-    setSideDockComposerH(0);
-  }, [sideWorkbench.expanded]);
 
   // Dock on: measure composer height → shrink side pane bottom.
   // Webview host follows aside height (no native hole-punch).
@@ -9858,10 +9762,6 @@ export function AppWorkbench() {
     showComposerPlus,
     welcomeSession,
   ]);
-
-  const onToggleSideDockComposer = useCallback(() => {
-    setSideDockComposer((on) => !on);
-  }, []);
 
   const stop = async () => {
     const now = Date.now();
@@ -10211,6 +10111,15 @@ export function AppWorkbench() {
     h.navigateSettings = navigateSettings;
     h.setPrHubHighlightPr = setPrHubHighlightPr;
     h.setSettingsFocusAnchor = setSettingsFocusAnchor;
+  }
+  {
+    const h = sideWorkbenchHostRef.current;
+    h.tr = tr;
+    h.showToast = showToast;
+    h.openAsidePane = openAsidePane;
+    h.setResourceOpenTarget = setResourceOpenTarget;
+    h.setPlanFocusKey = setPlanFocusKey;
+    h.asideCollapsed = () => layoutRef.current.asideCollapsed;
   }
 
   /**
@@ -10798,14 +10707,7 @@ export function AppWorkbench() {
       closeAsidePane();
     },
     openSidePicker: (kind: SidePickerKind) => {
-      setSideWorkbench((s) => {
-        const next = openSideTabFromPicker(s, kind, {
-          isGitProject: sideIsGitProject,
-        });
-        if (!("created" in next)) return s;
-        return next;
-      });
-      openAsidePane();
+      openPicker(kind);
     },
     toggleBottomTerminal: () => {
       bottomTerminal.toggle();
@@ -11028,52 +10930,6 @@ export function AppWorkbench() {
     onArm: () => showToast(tr("app.quitPressAgain"), QUIT_DOUBLE_PRESS_MS),
     onQuit: () => requestAppQuit("shortcut"),
   });
-
-  /**
-   * Host menu ⌘W / Ctrl+W (replaces native Close Window). Browser-like:
-   * active side tab first when the strip is non-empty and the aside is open;
-   * empty strip (or collapsed leftover tabs) falls through to window close.
-   * Decision is pure — see {@link applySideStripClose}.
-   */
-  const closeSideTabOrWindow = useCallback(() => {
-    const s = sideWorkbenchRef.current;
-    const result = applySideStripClose(s, {
-      asideCollapsed: layoutRef.current.asideCollapsed,
-    });
-    if (result.closeWindow) {
-      void (async () => {
-        try {
-          const { getCurrentWindow } = await import("@tauri-apps/api/window");
-          await getCurrentWindow().close();
-        } catch (e) {
-          console.warn("close window after empty side tabs failed", e);
-        }
-      })();
-      return;
-    }
-    closeActiveSideTokenRef.current += 1;
-    setCloseActiveSideRequest({ token: closeActiveSideTokenRef.current });
-  }, []);
-
-  useEffect(() => {
-    if (!api.isTauri()) return;
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    void (async () => {
-      try {
-        unlisten = await api.listen(APP_CLOSE_TAB_OR_WINDOW_EVENT, () => {
-          closeSideTabOrWindow();
-        });
-        if (cancelled) unlisten();
-      } catch (e) {
-        console.warn("close-tab-or-window listener failed", e);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [closeSideTabOrWindow]);
 
   const error = session.lastError;
   const errorBanner = useMemo(
@@ -12092,28 +11948,20 @@ export function AppWorkbench() {
   const onThreadOpenSessionChanges = useCallback(() => {
     seedSessionChangesForReview(null);
     // Open Review synchronously — do not rely only on openRequest races (#998).
-    setSideWorkbench((s) => openSideTab(s, "review"));
-    openAsidePane();
+    openReview();
     setResourceOpenTarget({ type: "changes" });
-  }, [openAsidePane, seedSessionChangesForReview]);
+  }, [openReview, seedSessionChangesForReview]);
 
   const onThreadOpenModifiedPath = useCallback(
     (path: string) => {
       const p = (path || "").trim();
       seedSessionChangesForReview(p);
       // Synchronously ensure Review tab exists before aside paint (#998).
-      setSideWorkbench((s) => openSideTab(s, "review"));
-      openAsidePane();
-      if (p) {
-        setReviewFocus((prev) => ({
-          path: p,
-          token: (prev?.token ?? 0) + 1,
-          pinnedPaths: pinReviewFocusPath(prev?.pinnedPaths ?? [], p),
-        }));
-      }
+      openReview();
+      if (p) focusReviewPath(p);
       setResourceOpenTarget({ type: "changes", path: p || undefined });
     },
-    [openAsidePane, seedSessionChangesForReview],
+    [focusReviewPath, openReview, seedSessionChangesForReview],
   );
 
   const onThreadOpenResource = useCallback(
@@ -13492,7 +13340,7 @@ export function AppWorkbench() {
             onThreadOpenSessionChanges={onThreadOpenSessionChanges}
             onThreadRemoveEditAttachment={onThreadRemoveEditAttachment}
             openExternalLinkFromChat={openExternalLinkFromChat}
-            openPlanInResource={openPlanInResource}
+            openPlanInResource={openPlan}
             openReliability={openReliability}
             openRequestPlanChanges={openRequestPlanChanges}
             openSession={openSession}
@@ -13777,7 +13625,7 @@ export function AppWorkbench() {
           sideWorkbench={sideWorkbench}
           setSideWorkbench={setSideWorkbench}
           sideDockComposer={sideDockComposer}
-          onToggleSideDockComposer={onToggleSideDockComposer}
+          onToggleSideDockComposer={toggleDockComposer}
           sessionChanges={
             sessionChangesById[reviewSessionId] ??
             sessionChangesById[session.sessionId || ""] ??
@@ -13800,14 +13648,9 @@ export function AppWorkbench() {
           resourceOpenTarget={resourceOpenTarget}
           onOpenRequestConsumed={() => setResourceOpenTarget(null)}
           closeActiveSideRequest={closeActiveSideRequest}
-          onCloseActiveRequestConsumed={() =>
-            setCloseActiveSideRequest(null)
-          }
+          onCloseActiveRequestConsumed={consumeCloseActive}
           onToggleSide={layout.asideCollapsed ? openAsidePane : closeAsidePane}
-          onExpandedChange={(expanded) => {
-            if (phoneLayout) return;
-            if (!expanded) setSideDockComposer(false);
-          }}
+          onExpandedChange={onExpandedChange}
           skillInfos={skillInfos}
           skillsLoading={skillsLoading}
           skillsLoadError={skillsLoadError}

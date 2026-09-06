@@ -12,7 +12,7 @@
 | Spec | `docs/plans/2026-08-01-code-quality-remediation-GOAL.md` |
 | Started | `2026-08-01` |
 | Current wave | `workbench-decomp` |
-| Current WP | `WP-W28` |
+| Current WP | `WP-W29` |
 | **FINAL** | **PASS** (honest orchestration metrics; decreasing ceilings) |
 
 ## Wave checklist
@@ -74,6 +74,7 @@
 | WP-W26 | Settings prefs hydrate into useAppSettingsPrefs | PASS | aae65cf4 | 15612→15471 lines; useState 209→156 |
 | WP-W27 | Session connect + live map into useSessionConnect | PASS | aae65cf4 | 15471→15183 lines; useState 156→155; useEffect 81→80 |
 | WP-W28 | Git worktree + ship chrome into useGitWorktreeChrome | PASS |  | #1033; 15237→14416 lines; useState 154→122; useEffect 78→75 |
+| WP-W29 | Side Workbench chrome into useSideWorkbenchChrome | PASS |  | #1042; 14416→14258 lines; useState 122→116; useEffect 75→71; plan `docs/plans/2026-09-06-appworkbench-w29-side-workbench.md` |
 
 ## Metrics log (append-only)
 
@@ -113,6 +114,7 @@
 | 2026-08-24 W26 | 15471 (shell 18 + wb 15453) | 156 | 81 | 11 | dir | dir | 28 | 9 | 69 |
 | 2026-08-24 W27 | 15183 (shell 18 + wb 15165) | 155 | 80 | 11 | dir | dir | 28 | 9 | 69 |
 | 2026-09-05 W28 | 14416 (shell 21 + wb 14395) | 122 | 75 | 12 | dir | dir | 29 | 9 | 80 |
+| 2026-09-06 W29 | 14258 (shell 21 + wb 14237) | 116 | 71 | 12 | dir | dir | 29 | 9 | 80 |
 
 ## Blockers
 
