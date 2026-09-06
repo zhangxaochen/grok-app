@@ -13,6 +13,12 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+## [0.2.32] - 2026-09-06
+
+> **Highlight:** Windows drag-drop and Mac Doubao voice work again, with leaner tool memory.
+>
+> **中文 · 亮点：** Windows 拖放与 Mac 豆包语音恢复可用，工具内存也更省。
+
 ### Changed
 - The quote toolbar appears after text selection settles, keeping chat selection smooth.
 - Slash and @ detection pause while the window is hidden or the input is not focused.
