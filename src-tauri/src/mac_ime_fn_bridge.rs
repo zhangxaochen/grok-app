@@ -12,8 +12,8 @@
 
 #![cfg(target_os = "macos")]
 
-use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Once;
 
 /// Hardware Fn / Globe (kVK_Function). WebKit ignores this in flagsChanged.
 pub const FN_KEY_CODE: u16 = 63;
@@ -148,8 +148,7 @@ unsafe fn post_right_option_tap(ns_app: *mut objc2::runtime::AnyObject) {
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
 
-    let empty: *mut AnyObject =
-        msg_send![class!(NSString), stringWithUTF8String: b"\0".as_ptr() as *const i8];
+    let empty: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"".as_ptr()];
     let loc = CGPoint { x: 0.0, y: 0.0 };
     for ty in [NS_EVENT_TYPE_KEY_DOWN, NS_EVENT_TYPE_KEY_UP] {
         let ev: *mut AnyObject = msg_send![
@@ -174,7 +173,7 @@ unsafe fn post_right_option_tap(ns_app: *mut objc2::runtime::AnyObject) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FN_KEY_CODE, RIGHT_OPTION_KEY_CODE, input_source_looks_like_doubao};
+    use super::{input_source_looks_like_doubao, FN_KEY_CODE, RIGHT_OPTION_KEY_CODE};
 
     #[test]
     fn fn_keycode_is_apple_function_key() {
@@ -189,6 +188,8 @@ mod tests {
         ));
         assert!(input_source_looks_like_doubao("com.foo.Doubao.bar"));
         assert!(!input_source_looks_like_doubao("com.apple.keylayout.ABC"));
-        assert!(!input_source_looks_like_doubao("com.sogou.inputmethod.pinyin"));
+        assert!(!input_source_looks_like_doubao(
+            "com.sogou.inputmethod.pinyin"
+        ));
     }
 }
