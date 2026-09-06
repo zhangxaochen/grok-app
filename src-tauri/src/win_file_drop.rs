@@ -33,10 +33,10 @@ use windows::{
         Foundation::{HWND, LPARAM, POINT, POINTL},
         Graphics::Gdi::ScreenToClient,
         System::{
-            Com::{IDataObject, ReleaseStgMedium, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL},
+            Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL},
             Ole::{
-                IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, RevokeDragDrop,
-                CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
+                IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium,
+                RevokeDragDrop, CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
             },
             SystemServices::MODIFIERKEYS_FLAGS,
         },
@@ -176,7 +176,7 @@ fn inject_hwnd(hwnd: HWND, coordinate_hwnd: HWND, listener: Rc<dyn Fn(DropKind)>
     if hwnd.0.is_null() {
         return false;
     }
-    let target: IDropTarget = FileDropTarget::new(hwnd, coordinate_hwnd, listener).into();
+    let target: IDropTarget = FileDropTarget::new(coordinate_hwnd, listener).into();
     // Best-effort revoke (hwnd may never have been a drop target — that is OK).
     let _ = unsafe { RevokeDragDrop(hwnd) };
     match unsafe { RegisterDragDrop(hwnd, &target) } {
@@ -230,7 +230,6 @@ fn enum_child_hwnds(parent: HWND) -> Vec<HWND> {
 
 #[implement(IDropTarget)]
 struct FileDropTarget {
-    hwnd: HWND,
     coordinate_hwnd: HWND,
     listener: Rc<dyn Fn(DropKind)>,
     cursor_effect: UnsafeCell<DROPEFFECT>,
@@ -238,9 +237,8 @@ struct FileDropTarget {
 }
 
 impl FileDropTarget {
-    fn new(hwnd: HWND, coordinate_hwnd: HWND, listener: Rc<dyn Fn(DropKind)>) -> Self {
+    fn new(coordinate_hwnd: HWND, listener: Rc<dyn Fn(DropKind)>) -> Self {
         Self {
-            hwnd,
             coordinate_hwnd,
             listener,
             cursor_effect: UnsafeCell::new(DROPEFFECT_NONE),
